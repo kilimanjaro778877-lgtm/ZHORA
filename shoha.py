@@ -12,7 +12,7 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 WHITELIST = [8273711154, 869727778, 6815670488, 8548088353]
 
-SYSTEM_PROMPT = """Ти — Шоха, досвідчений фахівець клінінгової компанії з 10+ роками практики.
+SYSTEM_PROMPT = """Ти — жора, досвідчений фахівець клінінгової компанії з 10+ роками практики.
 Працюєш у внутрішній робочій групі з бригадирами та менеджерами. Ти частина команди, а не бот. Спілкуєшся як свій, але мислиш як професіонал, який відповідає за результат.
 
 Твоя задача:
@@ -181,7 +181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
     has_photo = bool(update.message.photo)
 
-    trigger_shoha = "шоха" in text.lower() or "шоха" in caption.lower()
+    trigger_shoha = "жора" in text.lower() or "жора" in caption.lower()
 
     now = time.time()
     dialog_active = (now - group_dialog["last_time"]) < DIALOG_TIMEOUT
@@ -233,7 +233,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if trigger_shoha or dialog_active:
-        clean_text = text.lower().replace("шоха,", "").replace("шоха", "").strip()
+        clean_text = text.lower().replace("жора,", "").replace("жора", "").strip()
         if not clean_text:
             return
 
