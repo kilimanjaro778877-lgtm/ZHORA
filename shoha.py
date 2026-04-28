@@ -462,14 +462,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             lines = [f"🔍 Знайдено: {len(results)}\n{'─'*22}"]
             for r in results:
-                lines.append(
-                    f"📅 {r.get('Дата','')}\n"
-                    f"👤 {r.get(\"Ім'я\",'')}\n"
-                    f"📞 {r.get('Телефон','')}\n"
-                    f"💰 {r.get('Сума (грн)','')}\n"
-                    f"🔧 {r.get('Хто працював','')}\n"
-                    f"{'─'*22}"
-                )
+    name = r.get("Ім'я", "")
+    lines.append(
+        f"📅 {r.get('Дата','')}\n"
+        f"👤 {name}\n"
+        f"📞 {r.get('Телефон','')}\n"
+        f"💰 {r.get('Сума (грн)','')}\n"
+        f"🔧 {r.get('Хто працював','')}\n"
+        + "─"*22
+    )
             await update.message.reply_text("\n".join(lines))
         return
 
