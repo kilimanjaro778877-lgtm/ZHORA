@@ -172,9 +172,10 @@ def write_lead(name, phone, target_date=None):
     """
     try:
         ws = get_ws()
-        if target = target_date.strip()
-if len(target) <= 5:
-    target = target + "." + datetime.now().strftime("%Y")
+if target_date:
+            target = target_date.strip()
+            if len(target) <= 5:
+                target = target + "." + datetime.now().strftime("%Y")
         else:
             target = datetime.now().strftime("%d.%m.%Y")
 
