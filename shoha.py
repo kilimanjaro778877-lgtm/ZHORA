@@ -17,22 +17,22 @@ from telegram.ext import (
 
 TELEGRAM_TOKEN = os.environ.get("SHOHA_TOKEN")
 ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_KEY")
-DATABASE_URL   = os.environ.get("DATABASE_URL")          # PostgreSQL
-GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS_JSON")     # JSON сервіс-акаунту як рядок
-SHEET_ID       = os.environ.get("GOOGLE_SHEET_ID")       # ID таблиці з URL
+DATABASE_URL   = os.environ.get("DATABASE_URL")
+GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS_JSON")
+SHEET_ID       = os.environ.get("GOOGLE_SHEET_ID")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 WHITELIST = [8273711154, 869727778, 6815670488, 8548088353]
 
-# ConversationHandler стани для форми ліда
 LEAD_NAME, LEAD_PHONE, LEAD_SUM, LEAD_WORKER = range(4)
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # GOOGLE SHEETS
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 SHEET_HEADERS = ["Дата", "Ім'я", "Телефон", "Сума (грн)", "Хто працював"]
+NAME_KEY = "Ім'я"
 
 def get_sheet():
     creds_dict = json.loads(GOOGLE_CREDS)
@@ -51,7 +51,7 @@ def get_sheet():
     return ws
 
 
-def add_lead(name: str, phone: str, amount: str, worker: str) -> bool:
+def add_lead(name, phone, amount, worker):
     try:
         ws = get_sheet()
         date_str = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -62,14 +62,14 @@ def add_lead(name: str, phone: str, amount: str, worker: str) -> bool:
         return False
 
 
-def search_lead(query: str) -> list[dict]:
+def search_lead(query):
     try:
         ws = get_sheet()
         records = ws.get_all_records(expected_headers=SHEET_HEADERS)
         query_lower = query.lower().strip()
         results = [
             r for r in records
-            if query_lower in str(r.get("Ім'я", "")).lower()
+            if query_lower in str(r.get(NAME_KEY, "")).lower()
             or query in str(r.get("Телефон", ""))
         ]
         return results[-10:]
@@ -78,7 +78,7 @@ def search_lead(query: str) -> list[dict]:
         return []
 
 
-def get_stats() -> dict:
+def get_stats():
     try:
         ws = get_sheet()
         records = ws.get_all_records(expected_headers=SHEET_HEADERS)
@@ -105,11 +105,11 @@ def get_stats() -> dict:
         print(f"Sheets stats error: {e}")
         return {}
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # SYSTEM PROMPT
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
-SYSTEM_PROMPT = """Ти — жора, досвідчений фахівець клінінгової компанії з 10+ роками практики.
+SYSTEM_PROMPT = """Ти — Жора, досвідчений фахівець клінінгової компанії з 10+ роками практики.
 Працюєш у внутрішній робочій групі з бригадирами та менеджерами. Ти частина команди, а не бот. Спілкуєшся як свій, але мислиш як професіонал, який відповідає за результат.
 
 Твоя задача:
@@ -120,12 +120,14 @@ SYSTEM_PROMPT = """Ти — жора, досвідчений фахівець к
 - підстраховувати команду, якщо щось забули або не врахували
 - оптимізувати процес, щоб було швидко і якісно
 
-Стиль спілкування:
-- українська + суржик (живий, розмовний стиль)
-- коротко, чітко, по справі
-- без офіціозу, без "води"
-- можеш жартувати, але без клоунади
-- якщо в чаті використовують мат — можеш іноді відповісти в тому ж стилі, але доречно і без перегибів
+Мова спілкування:
+- Якщо до тебе пишуть українською — відповідай українською + суржик
+- Якщо до тебе пишуть російською — відповідай російською, природно і по-свойски
+- Можеш мішати мови як в живому спілкуванні — це нормально
+- Завжди коротко, чітко, по справі
+- Без офіціозу, без "води"
+- Можеш жартувати, але без клоунади
+- Якщо в чаті використовують мат — можеш іноді відповісти в тому ж стилі, але доречно і без перегибів
 
 Як ти мислиш:
 - як бригадир з великим досвідом
@@ -237,9 +239,9 @@ SYSTEM_PROMPT = """Ти — жора, досвідчений фахівець к
 - При хімчистці: пилосос з турбощіткою, пароочисник
 - При мийці вікон: скловидалювач, мікрофібра для скла"""
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # БАЗА ДАНИХ
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -261,7 +263,7 @@ def init_db():
     cur.close()
     conn.close()
 
-def save_dialog(question: str, answer: str):
+def save_dialog(question, answer):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("INSERT INTO dialogs (question, answer) VALUES (%s, %s)", (question, answer))
@@ -269,7 +271,7 @@ def save_dialog(question: str, answer: str):
     cur.close()
     conn.close()
 
-def search_archive(query: str, limit: int = 3) -> list[dict]:
+def search_archive(query, limit=3):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
@@ -282,14 +284,14 @@ def search_archive(query: str, limit: int = 3) -> list[dict]:
     conn.close()
     return [dict(r) for r in results]
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # СТИСНЕННЯ КОНТЕКСТУ
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 MAX_HISTORY = 10
 KEEP_RECENT = 4
 
-def compress_history(history: list) -> list:
+def compress_history(history):
     if len(history) <= MAX_HISTORY:
         return history
     old = history[:-KEEP_RECENT]
@@ -310,62 +312,70 @@ def compress_history(history: list) -> list:
         summary = resp.content[0].text.strip()
     except Exception:
         return recent
-    return [{"role": "user", "content": f"[Контекст попереднього діалогу]: {summary}"}] + recent
+    return [{"role": "user", "content": "[Контекст попереднього діалогу]: " + summary}] + recent
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # СТАН ДІАЛОГУ
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 DIALOG_TIMEOUT = 300
 group_dialog = {"active": False, "last_time": 0, "history": []}
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # ЧЕКЛИСТ ЗАБРУДНЕНЬ
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 CONTAMINATIONS = [
-    ("🟡 Жир", "grease"), ("🔵 Вапняний наліт/камінь", "limestone"),
-    ("🟤 Іржа", "rust"), ("⬛ Цвіль/пліснява", "mold"),
-    ("🪟 Брудні вікна", "windows"), ("🍳 Плита/духовка/холодильник", "appliances"),
-    ("🔲 Шви плитки", "tile_joints"), ("🧹 Складні плями", "stains"),
-    ("👃 Неприємний запах", "smell"), ("🐾 Шерсть тварин", "pet_hair"),
-    ("📏 Високі стелі", "high_ceiling"), ("🏗 Після ремонту", "after_repair"),
-    ("💀 Запущений об'єкт", "neglected"), ("🛋 М'які меблі/килими", "soft_furniture"),
-    ("💧 Немає води/світла", "no_utilities"), ("🌸 Потрібен парфум", "perfume"),
+    ("🟡 Жир", "grease"),
+    ("🔵 Вапняний наліт/камінь", "limestone"),
+    ("🟤 Іржа", "rust"),
+    ("⬛ Цвіль/пліснява", "mold"),
+    ("🪟 Брудні вікна", "windows"),
+    ("🍳 Плита/духовка/холодильник", "appliances"),
+    ("🔲 Шви плитки", "tile_joints"),
+    ("🧹 Складні плями", "stains"),
+    ("👃 Неприємний запах", "smell"),
+    ("🐾 Шерсть тварин", "pet_hair"),
+    ("📏 Високі стелі", "high_ceiling"),
+    ("🏗 Після ремонту", "after_repair"),
+    ("💀 Запущений об'єкт", "neglected"),
+    ("🛋 М'які меблі/килими", "soft_furniture"),
+    ("💧 Немає води/світла", "no_utilities"),
+    ("🌸 Потрібен парфум", "perfume"),
 ]
 
 def checklist_keyboard(selected):
     keyboard = []
     for label, key in CONTAMINATIONS:
         mark = "✅ " if key in selected else ""
-        keyboard.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"check_{key}")])
+        keyboard.append([InlineKeyboardButton(mark + label, callback_data="check_" + key)])
     keyboard.append([InlineKeyboardButton("Готово — отримати звіт", callback_data="check_done")])
     return InlineKeyboardMarkup(keyboard)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ФОРМА ЛІДА (крок за кроком)
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
+# ФОРМА ЛІДА
+# ==============================================================================
 
-async def lead_form_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def lead_form_start(update, context):
     await update.message.reply_text("📋 *Новий лід*\n\nІм'я клієнта:", parse_mode="Markdown")
     return LEAD_NAME
 
-async def lead_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def lead_name(update, context):
     context.user_data["lead_name"] = update.message.text.strip()
     await update.message.reply_text("📞 Телефон:")
     return LEAD_PHONE
 
-async def lead_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def lead_phone(update, context):
     context.user_data["lead_phone"] = update.message.text.strip()
     await update.message.reply_text("💰 Сума (грн):")
     return LEAD_SUM
 
-async def lead_sum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def lead_sum(update, context):
     context.user_data["lead_sum"] = update.message.text.strip()
     await update.message.reply_text("👤 Хто працював?")
     return LEAD_WORKER
 
-async def lead_worker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def lead_worker(update, context):
     worker = update.message.text.strip()
     name   = context.user_data.get("lead_name", "")
     phone  = context.user_data.get("lead_phone", "")
@@ -373,44 +383,52 @@ async def lead_worker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     ok = add_lead(name, phone, amount, worker)
     if ok:
         await update.message.reply_text(
-            f"✅ Записано!\n\n👤 {name}\n📞 {phone}\n💰 {amount} грн\n🔧 {worker}"
+            "✅ Записано!\n\n"
+            + "👤 " + name + "\n"
+            + "📞 " + phone + "\n"
+            + "💰 " + amount + " грн\n"
+            + "🔧 " + worker
         )
     else:
         await update.message.reply_text("❌ Помилка запису. Перевір підключення до таблиці.")
     context.user_data.clear()
     return ConversationHandler.END
 
-async def lead_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def lead_cancel(update, context):
     await update.message.reply_text("Скасовано.")
     context.user_data.clear()
     return ConversationHandler.END
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ПАРСИНГ ШВИДКОГО ЗАПИСУ
-# «жора, запиши ліда: Іван, +380..., 2500грн, Маша»
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
+# ПАРСИНГ ШВИДКОГО ЗАПИСУ ЛІДА
+# ==============================================================================
 
-def parse_quick_lead(text: str) -> dict | None:
-    cleaned = re.sub(r"жора[,\s]+запиши\s+л[іi]да?\s*[:—\-]?\s*", "", text, flags=re.IGNORECASE).strip()
+def parse_quick_lead(text):
+    cleaned = re.sub(r"жора[,\s]+запиши\s+л[іiи]да?\s*[:—\-]?\s*", "", text, flags=re.IGNORECASE).strip()
     parts = [p.strip() for p in cleaned.split(",")]
     if len(parts) < 4:
         return None
-    return {"name": parts[0], "phone": parts[1], "amount": parts[2], "worker": ", ".join(parts[3:])}
+    return {
+        "name": parts[0],
+        "phone": parts[1],
+        "amount": parts[2],
+        "worker": ", ".join(parts[3:])
+    }
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # ГОЛОВНИЙ ХЕНДЛЕР
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update, context):
     if not update.message:
         return
     user_id = update.effective_user.id
     if user_id not in WHITELIST:
         return
 
-    text       = update.message.text or ""
-    caption    = update.message.caption or ""
-    has_photo  = bool(update.message.photo)
+    text      = update.message.text or ""
+    caption   = update.message.caption or ""
+    has_photo = bool(update.message.photo)
     text_lower = text.lower()
 
     trigger_zhora = "жора" in text_lower or "жора" in caption.lower()
@@ -426,75 +444,81 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not trigger_zhora and not dialog_active and not has_photo:
         return
 
-    # 1. ШВИДКИЙ ЗАПИС ЛІДА ─────────────────────────────────────────────────
-    if trigger_zhora and re.search(r"запиши\s+л[іi]да?", text_lower):
+    # 1. ШВИДКИЙ ЗАПИС ЛІДА
+    if trigger_zhora and re.search(r"запиши\s+л[іiи]да?", text_lower):
         lead = parse_quick_lead(text)
         if lead:
             ok = add_lead(lead["name"], lead["phone"], lead["amount"], lead["worker"])
-            msg = (
-                f"✅ Лід записаний!\n\n👤 {lead['name']}\n📞 {lead['phone']}\n"
-                f"💰 {lead['amount']} грн\n🔧 {lead['worker']}"
-                if ok else "❌ Не вдалось записати. Перевір таблицю."
-            )
+            if ok:
+                msg = (
+                    "✅ Лід записаний!\n\n"
+                    + "👤 " + lead["name"] + "\n"
+                    + "📞 " + lead["phone"] + "\n"
+                    + "💰 " + lead["amount"] + " грн\n"
+                    + "🔧 " + lead["worker"]
+                )
+            else:
+                msg = "❌ Не вдалось записати. Перевір таблицю."
         else:
             msg = (
                 "Не зрозумів формат 🤔\n\n"
-                "Пиши так:\n_Жора, запиши ліда: Іван, +380501234567, 2500грн, Маша_"
+                "Пиши так:\n"
+                "_Жора, запиши ліда: Іван, +380501234567, 2500грн, Маша_"
             )
         await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
-    # 2. ЗАПУСК ФОРМИ ────────────────────────────────────────────────────────
-    if trigger_zhora and re.search(r"(нов(ий|ого)?\s+л[іi]д|форма|додай\s+л[іi]да?)", text_lower):
+    # 2. ЗАПУСК ФОРМИ ЛІДА
+    if trigger_zhora and re.search(r"(нов(ий|ого)?\s+л[іiи]д|форма|додай\s+л[іiи]да?|новый\s+лид|добавь\s+лид)", text_lower):
         await lead_form_start(update, context)
         return
 
-    # 3. ПОШУК КЛІЄНТА ───────────────────────────────────────────────────────
-    if trigger_zhora and re.search(r"(знайди|шукай|пошук|є\s+клієнт)", text_lower):
+    # 3. ПОШУК КЛІЄНТА
+    if trigger_zhora and re.search(r"(знайди|шукай|пошук|є\s+клієнт|найди|поищи|есть\s+клиент)", text_lower):
         query = re.sub(r"жора[,\s]*", "", text_lower)
-        query = re.sub(r"(знайди|шукай|пошук|є\s+клієнт)[,\s]*", "", query).strip()
+        query = re.sub(r"(знайди|шукай|пошук|є\s+клієнт|найди|поищи|есть\s+клиент)[,\s]*", "", query).strip()
         if not query:
             await update.message.reply_text("Що шукати? Напиши ім'я або телефон.")
             return
         results = search_lead(query)
         if not results:
-            await update.message.reply_text(f"Нічого не знайшов по «{query}» 🤷")
+            await update.message.reply_text("Нічого не знайшов по «" + query + "» 🤷")
         else:
-            lines = [f"🔍 Знайдено: {len(results)}\n{'─'*22}"]
+            lines = ["🔍 Знайдено: " + str(len(results)) + "\n" + "─" * 22]
             for r in results:
-    lines = [f"🔍 Знайдено: {len(results)}\n" + "─"*22]
-            for r in results:
-                name = r.get("Ім'я", "")
+                client_name = r.get(NAME_KEY, "")
                 lines.append(
-                    f"📅 {r.get('Дата','')}\n"
-                    f"👤 {name}\n"
-                    f"📞 {r.get('Телефон','')}\n"
-                    f"💰 {r.get('Сума (грн)','')}\n"
-                    f"🔧 {r.get('Хто працював','')}\n"
-                    + "─"*22
+                    "📅 " + str(r.get("Дата", "")) + "\n"
+                    + "👤 " + client_name + "\n"
+                    + "📞 " + str(r.get("Телефон", "")) + "\n"
+                    + "💰 " + str(r.get("Сума (грн)", "")) + "\n"
+                    + "🔧 " + str(r.get("Хто працював", "")) + "\n"
+                    + "─" * 22
                 )
-            await update.message.reply_text("\n".join(lines))
             await update.message.reply_text("\n".join(lines))
         return
 
-    # 4. СТАТИСТИКА ──────────────────────────────────────────────────────────
-    if trigger_zhora and re.search(r"(стат|скільки|підсумок|звіт по лідам|доход)", text_lower):
+    # 4. СТАТИСТИКА
+    if trigger_zhora and re.search(r"(стат|скільки|підсумок|звіт по лідам|доход|статистика|сколько|итог)", text_lower):
         stats = get_stats()
         if not stats:
             await update.message.reply_text("Таблиця порожня або помилка підключення.")
             return
-        top = "\n".join(f"  {i+1}. {w} — {c} замовлень" for i, (w, c) in enumerate(stats["top_workers"]))
+        top = "\n".join(
+            "  " + str(i+1) + ". " + w + " — " + str(c) + " замовлень"
+            for i, (w, c) in enumerate(stats["top_workers"])
+        )
         msg = (
-            f"📊 *Статистика лідів*\n\n"
-            f"📋 Всього: {stats['total']}\n"
-            f"💰 Сума: {stats['sum']:,} грн\n"
-            f"📈 Середній чек: {stats['avg']:,} грн\n\n"
-            f"🏆 Топ працівники:\n{top}"
+            "📊 *Статистика лідів*\n\n"
+            + "📋 Всього: " + str(stats["total"]) + "\n"
+            + "💰 Сума: " + str(stats["sum"]) + " грн\n"
+            + "📈 Середній чек: " + str(stats["avg"]) + " грн\n\n"
+            + "🏆 Топ працівники:\n" + top
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
-    # 5. ФОТО ────────────────────────────────────────────────────────────────
+    # 5. ФОТО
     if has_photo and (trigger_zhora or dialog_active or caption):
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -519,21 +543,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_dialog(prompt, reply)
             await update.message.reply_text(reply)
         except Exception as e:
-            await update.message.reply_text(f"Помилка: {e}")
+            await update.message.reply_text("Помилка: " + str(e))
         return
 
-    # 6. ЧЕКЛИСТ ОГЛЯДУ ──────────────────────────────────────────────────────
-if trigger_zhora and re.search(
-    r"(огляд|обьект|об.єкт|объект|осмотр|що брати|що взяти|збери|"
-    r"дай кнопки|покажи кнопки|на уборку|на прибирання|збір хімії|що нести|"
-    r"підготуй список|що готувати|їдемо на|виїзд на|виїзд завтра)",
-    text_lower
-):
+    # 6. ЧЕКЛИСТ ОГЛЯДУ
+    if trigger_zhora and re.search(
+        r"(огляд|обьект|об.єкт|объект|осмотр|що брати|що взяти|збери|"
+        r"дай кнопки|покажи кнопки|на уборку|на прибирання|збір хімії|що нести|"
+        r"підготуй список|що готувати|їдемо на|виїзд на|виїзд завтра|"
+        r"что брать|что взять|собери|дай кнопки|на уборку|выезд)",
+        text_lower
+    ):
         context.user_data["checklist"] = []
-        await update.message.reply_text("Огляд об'єкту — відмічай що є:", reply_markup=checklist_keyboard([]))
+        await update.message.reply_text(
+            "Огляд об'єкту — відмічай що є:",
+            reply_markup=checklist_keyboard([])
+        )
         return
 
-    # 7. ЗВИЧАЙНИЙ ДІАЛОГ ────────────────────────────────────────────────────
+    # 7. ЗВИЧАЙНИЙ ДІАЛОГ
     if trigger_zhora or dialog_active:
         clean_text = re.sub(r"жора[,\s]*", "", text_lower).strip()
         if not clean_text:
@@ -543,9 +571,10 @@ if trigger_zhora and re.search(
         archive_context = ""
         if archive_hits:
             examples = "\n".join(
-                f"Питання: {h['question']}\nВідповідь: {h['answer']}" for h in archive_hits
+                "Питання: " + h["question"] + "\nВідповідь: " + h["answer"]
+                for h in archive_hits
             )
-            archive_context = f"\n\n[Схожі кейси з архіву]:\n{examples}"
+            archive_context = "\n\n[Схожі кейси з архіву]:\n" + examples
 
         group_dialog["history"] = compress_history(group_dialog["history"])
         group_dialog["history"].append({"role": "user", "content": clean_text + archive_context})
@@ -560,13 +589,13 @@ if trigger_zhora and re.search(
             save_dialog(clean_text, reply)
             await update.message.reply_text(reply)
         except Exception as e:
-            await update.message.reply_text(f"Помилка: {e}")
+            await update.message.reply_text("Помилка: " + str(e))
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # ХЕНДЛЕР ЧЕКЛИСТА
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
-async def handle_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_checklist(update, context):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in WHITELIST:
@@ -582,9 +611,9 @@ async def handle_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         labels = {key: label for label, key in CONTAMINATIONS}
         selected_labels = [labels[k] for k in selected if k in labels]
-        report = "ЗВІТ ОГЛЯДУ\n\nЗнайдено:\n" + "".join(f"- {l}\n" for l in selected_labels)
+        report = "ЗВІТ ОГЛЯДУ\n\nЗнайдено:\n" + "".join("- " + l + "\n" for l in selected_labels)
         prompt = (
-            f"Бригадир відмітив забруднення: {', '.join(selected_labels)}. "
+            "Бригадир відмітив забруднення: " + ", ".join(selected_labels) + ". "
             "Склади список що взяти з нашої хімії Clinex та Karpax, "
             "інвентар, і короткі поради по роботі з кожним забрудненням."
         )
@@ -597,7 +626,7 @@ async def handle_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_dialog(prompt, reply)
             await query.edit_message_text(report + "\n" + reply)
         except Exception as e:
-            await query.edit_message_text(f"Помилка: {e}")
+            await query.edit_message_text("Помилка: " + str(e))
         context.user_data["checklist"] = []
         return
 
@@ -609,9 +638,9 @@ async def handle_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["checklist"] = selected
     await query.edit_message_reply_markup(reply_markup=checklist_keyboard(selected))
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # ЗАПУСК
-# ──────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 if __name__ == "__main__":
     init_db()
@@ -624,7 +653,7 @@ if __name__ == "__main__":
             LEAD_SUM:    [MessageHandler(filters.TEXT & ~filters.COMMAND, lead_sum)],
             LEAD_WORKER: [MessageHandler(filters.TEXT & ~filters.COMMAND, lead_worker)],
         },
-        fallbacks=[MessageHandler(filters.Regex("(?i)скасувати|cancel"), lead_cancel)],
+        fallbacks=[MessageHandler(filters.Regex("(?i)скасувати|cancel|отмена"), lead_cancel)],
         per_chat=False,
         per_user=True,
     )
