@@ -4,14 +4,17 @@ import time
 import json
 import re
 from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 import anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 TELEGRAM_TOKEN = os.environ.get("SHOHA_TOKEN")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
-GOOGLE_CREDS = os.environ.get("GOOGLE_CREDS_JSON")
-SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
+ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_KEY")
+GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS_JSON")
+SHEET_ID       = "1_R7j0gmV7n8wQtrB_131iP3HiNAPA8_YiEHfgN0oP90"
+SHEET_NAME     = "ЧИСТО ТАК"
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
@@ -146,12 +149,11 @@ SYSTEM_PROMPT = """Ти — Жора, досвідчений фахівець к
 - Хімчистка: пилосос з турбощіткою, пароочисник
 - Вікна: скловидалювач, мікрофібра для скла"""
 
-# ─── GOOGLE SHEETS ────────────────────────────────────────────────────────────
+# ==============================================================================
+# GOOGLE SHEETS — запис в реальну таблицю
+# ==============================================================================
 
-NAME_KEY = "Ім'я"
-SHEET_HEADERS = ["Дата", NAME_KEY, "Телефон", "Сума (грн)", "Хто працював"]
-
-def get_sheet():
+def get_ws():
     creds_dict = json.loads(GOOGLE_CREDS)
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -159,64 +161,98 @@ def get_sheet():
     ]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SHEET_ID)
-    try:
-        ws = sh.worksheet("Ліди")
-    except Exception:
-        ws = sh.add_worksheet(title="Ліди", rows=1000, cols=10)
-        ws.append_row(SHEET_HEADERS)
-    return ws
+    return gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
-def add_lead(name, phone, amount, worker):
+
+def write_lead(name, phone, target_date=None):
+    """
+    Записує ім'я в колонку B і телефон в колонку C
+    в рядок де колонка A = target_date (формат "28.04")
+    Якщо date не передано — бере сьогодні
+    """
     try:
-        import gspread
-        ws = get_sheet()
-        ws.append_row([datetime.now().strftime("%d.%m.%Y %H:%M"), name, phone, amount, worker])
-        return True
+        ws = get_ws()
+        if target_date:
+            target = target_date.strip()
+        else:
+            target = datetime.now().strftime("%d.%m")
+
+        col_a = ws.col_values(1)
+        row_num = None
+        for i, val in enumerate(col_a):
+            if str(val).strip() == target:
+                row_num = i + 1
+                break
+
+        if not row_num:
+            return False, "Дату " + target + " не знайшов в таблиці 🤷"
+
+        ws.update_cell(row_num, 2, name)
+        ws.update_cell(row_num, 3, phone)
+        return True, target
+
     except Exception as e:
         print("Sheets error: " + str(e))
-        return False
+        return False, str(e)
 
-def search_lead(query):
+
+def get_stats():
+    """Читає таблицю і повертає статистику"""
     try:
-        import gspread
-        ws = get_sheet()
-        records = ws.get_all_records(expected_headers=SHEET_HEADERS)
+        ws = get_ws()
+        all_vals = ws.get_all_values()
+        total = 0
+        total_sum = 0
+        workers = {}
+        for row in all_vals[1:]:  # пропускаємо заголовок
+            if len(row) > 1 and row[1].strip():  # є ім'я
+                total += 1
+                if len(row) > 3:
+                    num = re.sub(r"[^\d.]", "", str(row[3]).replace(",", "."))
+                    try:
+                        total_sum += float(num)
+                    except Exception:
+                        pass
+        return {
+            "total": total,
+            "sum": int(total_sum),
+            "avg": int(total_sum // total) if total else 0
+        }
+    except Exception as e:
+        print("Stats error: " + str(e))
+        return {}
+
+
+def search_client(query):
+    """Шукає клієнта по імені або телефону"""
+    try:
+        ws = get_ws()
+        all_vals = ws.get_all_values()
         q = query.lower().strip()
-        results = [r for r in records if q in str(r.get(NAME_KEY, "")).lower() or query in str(r.get("Телефон", ""))]
+        results = []
+        for row in all_vals[1:]:
+            name = str(row[1]).lower() if len(row) > 1 else ""
+            phone = str(row[2]) if len(row) > 2 else ""
+            date = str(row[0]) if len(row) > 0 else ""
+            amount = str(row[3]) if len(row) > 3 else ""
+            if q in name or q in phone:
+                results.append({"date": date, "name": row[1] if len(row) > 1 else "", "phone": phone, "amount": amount})
         return results[-10:]
     except Exception as e:
         print("Search error: " + str(e))
         return []
 
-def get_stats():
-    try:
-        import gspread
-        ws = get_sheet()
-        records = ws.get_all_records(expected_headers=SHEET_HEADERS)
-        if not records:
-            return {}
-        amounts = []
-        workers = {}
-        for r in records:
-            num = re.sub(r"[^\d]", "", str(r.get("Сума (грн)", "0")))
-            if num:
-                amounts.append(int(num))
-            w = str(r.get("Хто працював", "")).strip()
-            if w:
-                workers[w] = workers.get(w, 0) + 1
-        top = sorted(workers.items(), key=lambda x: x[1], reverse=True)[:3]
-        return {"total": len(records), "sum": sum(amounts), "avg": sum(amounts) // len(amounts) if amounts else 0, "top": top}
-    except Exception as e:
-        print("Stats error: " + str(e))
-        return {}
-
-# ─── СТАН ДІАЛОГУ ────────────────────────────────────────────────────────────
+# ==============================================================================
+# СТАН ДІАЛОГУ
+# ==============================================================================
 
 DIALOG_TIMEOUT = 300
 group_dialog = {"active": False, "last_time": 0, "history": []}
+lead_form_state = {}
 
-# ─── ЧЕКЛИСТ ─────────────────────────────────────────────────────────────────
+# ==============================================================================
+# ЧЕКЛИСТ
+# ==============================================================================
 
 CONTAMINATIONS = [
     ("🟡 Жир", "grease"), ("🔵 Вапняний наліт/камінь", "limestone"),
@@ -237,9 +273,9 @@ def checklist_keyboard(selected):
     keyboard.append([InlineKeyboardButton("Готово — отримати звіт", callback_data="check_done")])
     return InlineKeyboardMarkup(keyboard)
 
-# ─── ФОРМА ЛІДА ──────────────────────────────────────────────────────────────
-
-lead_form_state = {}
+# ==============================================================================
+# ГОЛОВНИЙ ХЕНДЛЕР
+# ==============================================================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -273,68 +309,88 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         elif step == "phone":
             lead_form_state[user_id]["phone"] = text.strip()
-            lead_form_state[user_id]["step"] = "amount"
-            await update.message.reply_text("💰 Сума (грн):")
+            lead_form_state[user_id]["step"] = "confirm"
+            data = lead_form_state[user_id]
+            date_label = data.get("date") or datetime.now().strftime("%d.%m")
+            await update.message.reply_text(
+                "Записую на " + date_label + ":\n"
+                "👤 " + data["name"] + "\n"
+                "📞 " + data["phone"] + "\n\nВсе вірно?"
+            )
             return
-        elif step == "amount":
-            lead_form_state[user_id]["amount"] = text.strip()
-            lead_form_state[user_id]["step"] = "worker"
-            await update.message.reply_text("👤 Хто працював?")
-            return
-        elif step == "worker":
-            data = lead_form_state.pop(user_id)
-            ok = add_lead(data["name"], data["phone"], data["amount"], text.strip())
-            if ok:
-                await update.message.reply_text(
-                    "✅ Записано!\n\n"
-                    "👤 " + data["name"] + "\n"
-                    "📞 " + data["phone"] + "\n"
-                    "💰 " + data["amount"] + " грн\n"
-                    "🔧 " + text.strip()
-                )
+        elif step == "confirm":
+            if any(w in text_lower for w in ["так", "да", "ок", "ok", "yes", "вірно", "верно"]):
+                data = lead_form_state.pop(user_id)
+                ok, result = write_lead(data["name"], data["phone"], data.get("date"))
+                if ok:
+                    await update.message.reply_text("✅ Записано на " + result + "!")
+                else:
+                    await update.message.reply_text("❌ " + result)
             else:
-                await update.message.reply_text("❌ Помилка запису.")
+                lead_form_state.pop(user_id)
+                await update.message.reply_text("Скасовано.")
             return
 
     if not trigger_zhora and not dialog_active and not has_photo:
         return
 
-    # ─── Швидкий запис ліда ───
+    # ─── Швидкий запис: «Жора, запиши ліда: Іван, +380...» ───
+    # Або з датою: «Жора, запиши ліда на 30.04: Іван, +380...»
     if trigger_zhora and re.search(r"запиши\s+л[іiи]да?|записать\s+лид", text_lower):
-        cleaned = re.sub(r"жора[,\s]+запиши\s+л[іiи]да?\s*[:—\-]?\s*|жора[,\s]+записать\s+лид\s*[:—\-]?\s*", "", text, flags=re.IGNORECASE).strip()
-        parts = [p.strip() for p in cleaned.split(",")]
-        if len(parts) >= 4:
-            ok = add_lead(parts[0], parts[1], parts[2], ", ".join(parts[3:]))
+        date_match = re.search(r"на\s+(\d{1,2}[.]\d{2})", text_lower)
+        target_date = date_match.group(1) if date_match else None
+
+        cleaned = re.sub(r"жора[,\s]*", "", text, flags=re.IGNORECASE)
+        cleaned = re.sub(r"запиши\s+л[іiи]да?\s*(на\s+\d{1,2}[.]\d{2})?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"записать\s+лид\s*(на\s+\d{1,2}[.]\d{2})?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+        parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+
+        if len(parts) >= 2:
+            ok, result = write_lead(parts[0], parts[1], target_date)
             if ok:
-                await update.message.reply_text("✅ Лід записаний!\n\n👤 " + parts[0] + "\n📞 " + parts[1] + "\n💰 " + parts[2] + " грн\n🔧 " + ", ".join(parts[3:]))
+                await update.message.reply_text(
+                    "✅ Записано!\n\n"
+                    "📅 " + result + "\n"
+                    "👤 " + parts[0] + "\n"
+                    "📞 " + parts[1]
+                )
             else:
-                await update.message.reply_text("❌ Не вдалось записати.")
+                await update.message.reply_text("❌ " + result)
         else:
-            await update.message.reply_text("Формат: _Жора, запиши ліда: Іван, +380..., 2500грн, Маша_", parse_mode="Markdown")
+            await update.message.reply_text(
+                "Формат:\n"
+                "_Жора, запиши ліда: Іван, +380501234567_\n"
+                "_Жора, запиши ліда на 30.04: Іван, +380501234567_",
+                parse_mode="Markdown"
+            )
         return
 
-    # ─── Форма ліда ───
+    # ─── Форма ліда через кнопку ───
     if trigger_zhora and re.search(r"нов(ий|ого)?\s+л[іiи]д|новый\s+лид|додай\s+л[іiи]да?|добавь\s+лид|форма", text_lower):
-        lead_form_state[user_id] = {"step": "name"}
-        await update.message.reply_text("📋 *Новий лід*\n\nІм'я клієнта:", parse_mode="Markdown")
+        date_match = re.search(r"на\s+(\d{1,2}[.]\d{2})", text_lower)
+        lead_form_state[user_id] = {
+            "step": "name",
+            "date": date_match.group(1) if date_match else None
+        }
+        date_label = date_match.group(1) if date_match else datetime.now().strftime("%d.%m")
+        await update.message.reply_text("📋 Новий лід на " + date_label + "\n\nІм'я клієнта:")
         return
 
-    # ─── Пошук ───
+    # ─── Пошук клієнта ───
     if trigger_zhora and re.search(r"знайди|шукай|найди|поищи", text_lower):
         query = re.sub(r"жора[,\s]*", "", text_lower)
         query = re.sub(r"(знайди|шукай|найди|поищи)[,\s]*", "", query).strip()
-        results = search_lead(query)
+        results = search_client(query)
         if not results:
             await update.message.reply_text("Нічого не знайшов по «" + query + "» 🤷")
         else:
             lines = ["🔍 Знайдено: " + str(len(results)) + "\n" + "─" * 20]
             for r in results:
                 lines.append(
-                    "📅 " + str(r.get("Дата", "")) + "\n"
-                    + "👤 " + str(r.get(NAME_KEY, "")) + "\n"
-                    + "📞 " + str(r.get("Телефон", "")) + "\n"
-                    + "💰 " + str(r.get("Сума (грн)", "")) + "\n"
-                    + "🔧 " + str(r.get("Хто працював", "")) + "\n"
+                    "📅 " + r["date"] + "\n"
+                    "👤 " + r["name"] + "\n"
+                    "📞 " + r["phone"] + "\n"
+                    "💰 " + r["amount"] + "\n"
                     + "─" * 20
                 )
             await update.message.reply_text("\n".join(lines))
@@ -346,13 +402,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not stats:
             await update.message.reply_text("Таблиця порожня або помилка підключення.")
             return
-        top = "\n".join("  " + str(i+1) + ". " + w + " — " + str(c) + " замовлень" for i, (w, c) in enumerate(stats["top"]))
         await update.message.reply_text(
-            "📊 *Статистика лідів*\n\n"
-            "📋 Всього: " + str(stats["total"]) + "\n"
-            "💰 Сума: " + str(stats["sum"]) + " грн\n"
-            "📈 Середній чек: " + str(stats["avg"]) + " грн\n\n"
-            "🏆 Топ:\n" + top,
+            "📊 *Статистика*\n\n"
+            "📋 Всього клієнтів: " + str(stats["total"]) + "\n"
+            "💰 Загальна сума: " + str(stats["sum"]) + " грн\n"
+            "📈 Середній чек: " + str(stats["avg"]) + " грн",
             parse_mode="Markdown"
         )
         return
@@ -413,6 +467,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Помилка: " + str(e))
 
 
+# ==============================================================================
+# ХЕНДЛЕР ЧЕКЛИСТА
+# ==============================================================================
+
 async def handle_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -450,6 +508,10 @@ async def handle_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["checklist"] = selected
     await query.edit_message_reply_markup(reply_markup=checklist_keyboard(selected))
 
+
+# ==============================================================================
+# ЗАПУСК
+# ==============================================================================
 
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(CallbackQueryHandler(handle_checklist, pattern="^check_"))
