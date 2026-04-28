@@ -14,7 +14,7 @@ TELEGRAM_TOKEN = os.environ.get("SHOHA_TOKEN")
 ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_KEY")
 GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS_JSON")
 SHEET_ID       = "1_R7j0gmV7n8wQtrB_131iP3HiNAPA8_YiEHfgN0oP90"
-SHEET_NAME     = "ЧИСТО ТАК"
+SHEET_NAME     = "Аркуш1"
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
