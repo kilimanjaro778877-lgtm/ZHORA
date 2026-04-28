@@ -1,6 +1,5 @@
 anthropic
 python-telegram-bot
-psycopg2-binary
 gspread
 google-auth
 google-auth-oauthlib
