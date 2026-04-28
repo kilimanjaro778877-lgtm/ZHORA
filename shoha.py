@@ -149,9 +149,6 @@ SYSTEM_PROMPT = """Ти — Жора, досвідчений фахівець к
 - Хімчистка: пилосос з турбощіткою, пароочисник
 - Вікна: скловидалювач, мікрофібра для скла"""
 
-# ==============================================================================
-# GOOGLE SHEETS — запис в реальну таблицю
-# ==============================================================================
 
 def get_ws():
     creds_dict = json.loads(GOOGLE_CREDS)
@@ -165,14 +162,9 @@ def get_ws():
 
 
 def write_lead(name, phone, target_date=None):
-    """
-    Записує ім'я в колонку B і телефон в колонку C
-    в рядок де колонка A = target_date (формат "28.04")
-    Якщо date не передано — бере сьогодні
-    """
     try:
         ws = get_ws()
-if target_date:
+        if target_date:
             target = target_date.strip()
             if len(target) <= 5:
                 target = target + "." + datetime.now().strftime("%Y")
@@ -182,7 +174,7 @@ if target_date:
         col_a = ws.col_values(1)
         row_num = None
         for i, val in enumerate(col_a):
-            if str(val).strip() == target:
+            if target in str(val).strip():
                 row_num = i + 1
                 break
 
@@ -199,15 +191,13 @@ if target_date:
 
 
 def get_stats():
-    """Читає таблицю і повертає статистику"""
     try:
         ws = get_ws()
         all_vals = ws.get_all_values()
         total = 0
         total_sum = 0
-        workers = {}
-        for row in all_vals[1:]:  # пропускаємо заголовок
-            if len(row) > 1 and row[1].strip():  # є ім'я
+        for row in all_vals[1:]:
+            if len(row) > 1 and str(row[1]).strip():
                 total += 1
                 if len(row) > 3:
                     num = re.sub(r"[^\d.]", "", str(row[3]).replace(",", "."))
@@ -226,7 +216,6 @@ def get_stats():
 
 
 def search_client(query):
-    """Шукає клієнта по імені або телефону"""
     try:
         ws = get_ws()
         all_vals = ws.get_all_values()
@@ -238,23 +227,21 @@ def search_client(query):
             date = str(row[0]) if len(row) > 0 else ""
             amount = str(row[3]) if len(row) > 3 else ""
             if q in name or q in phone:
-                results.append({"date": date, "name": row[1] if len(row) > 1 else "", "phone": phone, "amount": amount})
+                results.append({
+                    "date": date,
+                    "name": row[1] if len(row) > 1 else "",
+                    "phone": phone,
+                    "amount": amount
+                })
         return results[-10:]
     except Exception as e:
         print("Search error: " + str(e))
         return []
 
-# ==============================================================================
-# СТАН ДІАЛОГУ
-# ==============================================================================
 
 DIALOG_TIMEOUT = 300
 group_dialog = {"active": False, "last_time": 0, "history": []}
 lead_form_state = {}
-
-# ==============================================================================
-# ЧЕКЛИСТ
-# ==============================================================================
 
 CONTAMINATIONS = [
     ("🟡 Жир", "grease"), ("🔵 Вапняний наліт/камінь", "limestone"),
@@ -275,9 +262,6 @@ def checklist_keyboard(selected):
     keyboard.append([InlineKeyboardButton("Готово — отримати звіт", callback_data="check_done")])
     return InlineKeyboardMarkup(keyboard)
 
-# ==============================================================================
-# ГОЛОВНИЙ ХЕНДЛЕР
-# ==============================================================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -301,7 +285,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif dialog_active:
         group_dialog["last_time"] = now
 
-    # ─── Форма ліда (крок за кроком) ───
     if user_id in lead_form_state:
         step = lead_form_state[user_id]["step"]
         if step == "name":
@@ -317,7 +300,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "Записую на " + date_label + ":\n"
                 "👤 " + data["name"] + "\n"
-                "📞 " + data["phone"] + "\n\nВсе вірно?"
+                "📞 " + data["phone"] + "\n\nВсе вірно? (так/ні)"
             )
             return
         elif step == "confirm":
@@ -336,17 +319,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not trigger_zhora and not dialog_active and not has_photo:
         return
 
-    # ─── Швидкий запис: «Жора, запиши ліда: Іван, +380...» ───
-    # Або з датою: «Жора, запиши ліда на 30.04: Іван, +380...»
     if trigger_zhora and re.search(r"запиши\s+л[іiи]да?|записать\s+лид", text_lower):
         date_match = re.search(r"на\s+(\d{1,2}[.]\d{2})", text_lower)
         target_date = date_match.group(1) if date_match else None
-
         cleaned = re.sub(r"жора[,\s]*", "", text, flags=re.IGNORECASE)
         cleaned = re.sub(r"запиши\s+л[іiи]да?\s*(на\s+\d{1,2}[.]\d{2})?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"записать\s+лид\s*(на\s+\d{1,2}[.]\d{2})?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
         parts = [p.strip() for p in cleaned.split(",") if p.strip()]
-
         if len(parts) >= 2:
             ok, result = write_lead(parts[0], parts[1], target_date)
             if ok:
@@ -367,7 +346,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # ─── Форма ліда через кнопку ───
     if trigger_zhora and re.search(r"нов(ий|ого)?\s+л[іiи]д|новый\s+лид|додай\s+л[іiи]да?|добавь\s+лид|форма", text_lower):
         date_match = re.search(r"на\s+(\d{1,2}[.]\d{2})", text_lower)
         lead_form_state[user_id] = {
@@ -378,7 +356,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📋 Новий лід на " + date_label + "\n\nІм'я клієнта:")
         return
 
-    # ─── Пошук клієнта ───
     if trigger_zhora and re.search(r"знайди|шукай|найди|поищи", text_lower):
         query = re.sub(r"жора[,\s]*", "", text_lower)
         query = re.sub(r"(знайди|шукай|найди|поищи)[,\s]*", "", query).strip()
@@ -398,7 +375,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("\n".join(lines))
         return
 
-    # ─── Статистика ───
     if trigger_zhora and re.search(r"стат|скільки|сколько|підсумок|итог|доход", text_lower):
         stats = get_stats()
         if not stats:
@@ -413,7 +389,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ─── Фото ───
     if has_photo and (trigger_zhora or dialog_active or caption):
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -436,7 +411,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Помилка: " + str(e))
         return
 
-    # ─── Чеклист ───
     if trigger_zhora and re.search(
         r"(огляд|обьект|об.єкт|объект|осмотр|що брати|що взяти|збери|"
         r"дай кнопки|покажи кнопки|на уборку|на прибирання|що нести|"
@@ -447,16 +421,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Огляд об'єкту — відмічай що є:", reply_markup=checklist_keyboard([]))
         return
 
-    # ─── Звичайний діалог ───
     if trigger_zhora or dialog_active:
         clean_text = re.sub(r"жора[,\s]*", "", text_lower).strip()
         if not clean_text:
             return
-
         group_dialog["history"].append({"role": "user", "content": clean_text})
         if len(group_dialog["history"]) > 10:
             group_dialog["history"] = group_dialog["history"][-10:]
-
         try:
             response = client.messages.create(
                 model="claude-sonnet-4-6", max_tokens=800, system=SYSTEM_PROMPT,
@@ -469,20 +440,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Помилка: " + str(e))
 
 
-# ==============================================================================
-# ХЕНДЛЕР ЧЕКЛИСТА
-# ==============================================================================
-
 async def handle_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in WHITELIST:
         return
-
     if "checklist" not in context.user_data:
         context.user_data["checklist"] = []
     selected = context.user_data["checklist"]
-
     if query.data == "check_done":
         if not selected:
             await query.edit_message_text("Нічого не відмічено. Об'єкт чистий?")
@@ -501,7 +466,6 @@ async def handle_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Помилка: " + str(e))
         context.user_data["checklist"] = []
         return
-
     key = query.data.replace("check_", "")
     if key in selected:
         selected.remove(key)
@@ -510,10 +474,6 @@ async def handle_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["checklist"] = selected
     await query.edit_message_reply_markup(reply_markup=checklist_keyboard(selected))
 
-
-# ==============================================================================
-# ЗАПУСК
-# ==============================================================================
 
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(CallbackQueryHandler(handle_checklist, pattern="^check_"))
