@@ -3,7 +3,7 @@ import base64
 import time
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 import anthropic
@@ -161,13 +161,24 @@ def get_ws():
     return gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
 
-def write_lead(name, phone, target_date=None):
+def parse_date(text_lower):
+    """
+    Парсить дату з тексту.
+    Підтримує: 'завтра', 'tomorrow', 'на 29.04', 'на 30.04' і т.д.
+    Повертає рядок формату 'дд.мм' або None
+    """
+    if re.search(r"завтра|tomorrow|завтрашн", text_lower):
+        return (datetime.now() + timedelta(days=1)).strftime("%d.%m")
+    match = re.search(r"на\s+(\d{1,2}[.]\d{2})", text_lower)
+    if match:
+        return match.group(1)
+    return None
+
+
+def write_lead(name, phone, amount=None, target_date=None):
     try:
         ws = get_ws()
-        if target_date:
-            target = target_date.strip()
-        else:
-            target = datetime.now().strftime("%d.%m")
+        target = target_date if target_date else datetime.now().strftime("%d.%m")
 
         col_a = ws.col_values(1)
         row_num = None
@@ -181,6 +192,10 @@ def write_lead(name, phone, target_date=None):
 
         ws.update_cell(row_num, 2, name)
         ws.update_cell(row_num, 3, phone)
+        if amount:
+            # Очищаємо суму — залишаємо тільки цифри і крапку
+            clean_amount = re.sub(r"[^\d.]", "", amount.replace(",", "."))
+            ws.update_cell(row_num, 4, clean_amount)
         return True, target
 
     except Exception as e:
@@ -284,6 +299,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif dialog_active:
         group_dialog["last_time"] = now
 
+    # ─── Форма ліда крок за кроком ───
     if user_id in lead_form_state:
         step = lead_form_state[user_id]["step"]
         if step == "name":
@@ -293,19 +309,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         elif step == "phone":
             lead_form_state[user_id]["phone"] = text.strip()
+            lead_form_state[user_id]["step"] = "amount"
+            await update.message.reply_text("💰 Сума замовлення:")
+            return
+        elif step == "amount":
+            lead_form_state[user_id]["amount"] = text.strip()
             lead_form_state[user_id]["step"] = "confirm"
             data = lead_form_state[user_id]
             date_label = data.get("date") or datetime.now().strftime("%d.%m")
             await update.message.reply_text(
                 "Записую на " + date_label + ":\n"
                 "👤 " + data["name"] + "\n"
-                "📞 " + data["phone"] + "\n\nВсе вірно? (так/ні)"
+                "📞 " + data["phone"] + "\n"
+                "💰 " + data["amount"] + "\n\nВсе вірно? (так/ні)"
             )
             return
         elif step == "confirm":
             if any(w in text_lower for w in ["так", "да", "ок", "ok", "yes", "вірно", "верно"]):
                 data = lead_form_state.pop(user_id)
-                ok, result = write_lead(data["name"], data["phone"], data.get("date"))
+                ok, result = write_lead(data["name"], data["phone"], data.get("amount"), data.get("date"))
                 if ok:
                     await update.message.reply_text("✅ Записано на " + result + "!")
                 else:
@@ -318,43 +340,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not trigger_zhora and not dialog_active and not has_photo:
         return
 
-    if trigger_zhora and re.search(r"запиши\s+л[іiи]да?|записать\s+лид", text_lower):
-        date_match = re.search(r"на\s+(\d{1,2}[.]\d{2})", text_lower)
-        target_date = date_match.group(1) if date_match else None
+    # ─── Швидкий запис ліда ───
+    # Формати:
+    # Жора, запиши ліда: Іван, 0660123456, 2700
+    # Жора запиши ліда на завтра: Іван, 0660123456, 2700
+    # Жора запиши ліда на 30.04: Іван, 0660123456, 2700
+    if trigger_zhora and re.search(r"запиши\s+л[іiи]да?|записать\s+лид|запиши\s+лида", text_lower):
+        target_date = parse_date(text_lower)
         cleaned = re.sub(r"жора[,\s]*", "", text, flags=re.IGNORECASE)
-        cleaned = re.sub(r"запиши\s+л[іiи]да?\s*(на\s+\d{1,2}[.]\d{2})?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"записать\s+лид\s*(на\s+\d{1,2}[.]\d{2})?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"запиши\s+л[іiи]да?\s*(на\s+(завтра|tomorrow|\d{1,2}[.]\d{2}))?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"записать\s+лид[а]?\s*(на\s+(завтра|tomorrow|\d{1,2}[.]\d{2}))?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
         parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+
         if len(parts) >= 2:
-            ok, result = write_lead(parts[0], parts[1], target_date)
+            name = parts[0]
+            phone = parts[1]
+            amount = parts[2] if len(parts) >= 3 else None
+            ok, result = write_lead(name, phone, amount, target_date)
             if ok:
-                await update.message.reply_text(
-                    "✅ Записано!\n\n"
-                    "📅 " + result + "\n"
-                    "👤 " + parts[0] + "\n"
-                    "📞 " + parts[1]
-                )
+                msg = "✅ Записано!\n\n📅 " + result + "\n👤 " + name + "\n📞 " + phone
+                if amount:
+                    msg += "\n💰 " + re.sub(r"[^\d.]", "", amount) + " грн"
+                await update.message.reply_text(msg)
             else:
                 await update.message.reply_text("❌ " + result)
         else:
             await update.message.reply_text(
                 "Формат:\n"
-                "_Жора, запиши ліда: Іван, +380501234567_\n"
-                "_Жора, запиши ліда на 30.04: Іван, +380501234567_",
+                "_Жора, запиши ліда: Іван, 0660123456, 2700_\n"
+                "_Жора, запиши ліда на завтра: Іван, 0660123456, 2700_\n"
+                "_Жора, запиши ліда на 30.04: Іван, 0660123456, 2700_",
                 parse_mode="Markdown"
             )
         return
 
+    # ─── Форма ліда ───
     if trigger_zhora and re.search(r"нов(ий|ого)?\s+л[іiи]д|новый\s+лид|додай\s+л[іiи]да?|добавь\s+лид|форма", text_lower):
-        date_match = re.search(r"на\s+(\d{1,2}[.]\d{2})", text_lower)
-        lead_form_state[user_id] = {
-            "step": "name",
-            "date": date_match.group(1) if date_match else None
-        }
-        date_label = date_match.group(1) if date_match else datetime.now().strftime("%d.%m")
+        target_date = parse_date(text_lower)
+        lead_form_state[user_id] = {"step": "name", "date": target_date}
+        date_label = target_date or datetime.now().strftime("%d.%m")
         await update.message.reply_text("📋 Новий лід на " + date_label + "\n\nІм'я клієнта:")
         return
 
+    # ─── Пошук ───
     if trigger_zhora and re.search(r"знайди|шукай|найди|поищи", text_lower):
         query = re.sub(r"жора[,\s]*", "", text_lower)
         query = re.sub(r"(знайди|шукай|найди|поищи)[,\s]*", "", query).strip()
@@ -374,6 +402,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("\n".join(lines))
         return
 
+    # ─── Статистика ───
     if trigger_zhora and re.search(r"стат|скільки|сколько|підсумок|итог|доход", text_lower):
         stats = get_stats()
         if not stats:
@@ -388,6 +417,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ─── Фото ───
     if has_photo and (trigger_zhora or dialog_active or caption):
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -410,6 +440,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Помилка: " + str(e))
         return
 
+    # ─── Чеклист ───
     if trigger_zhora and re.search(
         r"(огляд|обьект|об.єкт|объект|осмотр|що брати|що взяти|збери|"
         r"дай кнопки|покажи кнопки|на уборку|на прибирання|що нести|"
@@ -420,6 +451,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Огляд об'єкту — відмічай що є:", reply_markup=checklist_keyboard([]))
         return
 
+    # ─── Звичайний діалог ───
     if trigger_zhora or dialog_active:
         clean_text = re.sub(r"жора[,\s]*", "", text_lower).strip()
         if not clean_text:
