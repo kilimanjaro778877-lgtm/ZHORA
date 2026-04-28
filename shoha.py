@@ -166,15 +166,13 @@ def write_lead(name, phone, target_date=None):
         ws = get_ws()
         if target_date:
             target = target_date.strip()
-            if len(target) <= 5:
-                target = target + "." + datetime.now().strftime("%Y")
         else:
-            target = datetime.now().strftime("%d.%m.%Y")
+            target = datetime.now().strftime("%d.%m")
 
         col_a = ws.col_values(1)
         row_num = None
         for i, val in enumerate(col_a):
-            if target in str(val).strip():
+            if str(val).strip() == target:
                 row_num = i + 1
                 break
 
@@ -253,6 +251,7 @@ CONTAMINATIONS = [
     ("💀 Запущений об'єкт", "neglected"), ("🛋 М'які меблі/килими", "soft_furniture"),
     ("💧 Немає води/світла", "no_utilities"), ("🌸 Потрібен парфум", "perfume"),
 ]
+
 
 def checklist_keyboard(selected):
     keyboard = []
