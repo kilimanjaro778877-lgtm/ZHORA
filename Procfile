@@ -1,1 +1,1 @@
-worker: python shoha.py
+worker: python zhora_bot.py
