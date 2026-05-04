@@ -14,7 +14,6 @@ TELEGRAM_TOKEN = os.environ.get("SHOHA_TOKEN")
 ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_KEY")
 GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS_JSON")
 SHEET_ID       = "1_R7j0gmV7n8wQtrB_131iP3HiNAPA8_YiEHfgN0oP90"
-SHEET_NAME     = "Аркуш1"
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
@@ -150,29 +149,67 @@ SYSTEM_PROMPT = """Ти — Жора, досвідчений фахівець к
 - Вікна: скловидалювач, мікрофібра для скла"""
 
 
-def get_ws():
+# ── Назви місяців для автоматичного пошуку аркуша ──
+MONTH_NAMES = {
+    1:  ["січень", "январь", "january"],
+    2:  ["лютий", "февраль", "february"],
+    3:  ["березень", "март", "march"],
+    4:  ["квітень", "апрель", "april"],
+    5:  ["травень", "май", "may"],
+    6:  ["червень", "июнь", "june"],
+    7:  ["липень", "июль", "july"],
+    8:  ["серпень", "август", "august"],
+    9:  ["вересень", "сентябрь", "september"],
+    10: ["жовтень", "октябрь", "october"],
+    11: ["листопад", "ноябрь", "november"],
+    12: ["грудень", "декабрь", "december"],
+}
+
+
+def get_gc():
     creds_dict = json.loads(GOOGLE_CREDS)
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    gc = gspread.authorize(creds)
-    return gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+    return gspread.authorize(creds)
+
+
+def get_ws(month=None):
+    """
+    Знаходить аркуш по місяцю.
+    month — число 1-12, якщо None — бере поточний місяць.
+    """
+    gc = get_gc()
+    sh = gc.open_by_key(SHEET_ID)
+    if month is None:
+        month = datetime.now().month
+    keywords = MONTH_NAMES.get(month, [])
+    for ws in sh.worksheets():
+        ws_lower = ws.title.lower()
+        for kw in keywords:
+            if kw in ws_lower:
+                return ws
+    return sh.sheet1
 
 
 def parse_date(text_lower):
-    if re.search(r"завтра|tomorrow|завтрашн|зафтра", text_lower):
-        return (datetime.now() + timedelta(days=1)).strftime("%d.%m")
-    match = re.search(r"на\s+(\d{1,2}[.]\d{2})", text_lower)
+    """Парсить дату з тексту. Повертає (date_str, month)"""
+    if re.search(r"завтра|tomorrow|зафтра", text_lower):
+        tomorrow = datetime.now() + timedelta(days=1)
+        return tomorrow.strftime("%d.%m"), tomorrow.month
+    match = re.search(r"на\s+(\d{1,2})[.](\d{2})", text_lower)
     if match:
-        return match.group(1)
-    return None
+        day = match.group(1).zfill(2)
+        mon = match.group(2)
+        return day + "." + mon, int(mon)
+    return None, datetime.now().month
 
 
-def write_lead(name, phone, amount=None, target_date=None):
+def write_lead(name, phone, amount=None, target_date=None, month=None):
     try:
-        ws = get_ws()
+        ws = get_ws(month)
         target = target_date if target_date else datetime.now().strftime("%d.%m")
 
         col_a = ws.col_values(1)
@@ -225,22 +262,25 @@ def get_stats():
 
 def search_client(query):
     try:
-        ws = get_ws()
-        all_vals = ws.get_all_values()
+        gc = get_gc()
+        sh = gc.open_by_key(SHEET_ID)
         q = query.lower().strip()
         results = []
-        for row in all_vals[1:]:
-            name = str(row[1]).lower() if len(row) > 1 else ""
-            phone = str(row[2]) if len(row) > 2 else ""
-            date = str(row[0]) if len(row) > 0 else ""
-            amount = str(row[3]) if len(row) > 3 else ""
-            if q in name or q in phone:
-                results.append({
-                    "date": date,
-                    "name": row[1] if len(row) > 1 else "",
-                    "phone": phone,
-                    "amount": amount
-                })
+        for ws in sh.worksheets():
+            all_vals = ws.get_all_values()
+            for row in all_vals[1:]:
+                name = str(row[1]).lower() if len(row) > 1 else ""
+                phone = str(row[2]) if len(row) > 2 else ""
+                date = str(row[0]) if len(row) > 0 else ""
+                amount = str(row[3]) if len(row) > 3 else ""
+                if q in name or q in phone:
+                    results.append({
+                        "date": date,
+                        "sheet": ws.title,
+                        "name": row[1] if len(row) > 1 else "",
+                        "phone": phone,
+                        "amount": amount
+                    })
         return results[-10:]
     except Exception as e:
         print("Search error: " + str(e))
@@ -294,6 +334,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif dialog_active:
         group_dialog["last_time"] = now
 
+    # ── Форма ліда крок за кроком ──
     if user_id in lead_form_state:
         step = lead_form_state[user_id]["step"]
         if step == "name":
@@ -321,7 +362,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == "confirm":
             if any(w in text_lower for w in ["так", "да", "ок", "ok", "yes", "вірно", "верно"]):
                 data = lead_form_state.pop(user_id)
-                ok, result = write_lead(data["name"], data["phone"], data.get("amount"), data.get("date"))
+                ok, result = write_lead(
+                    data["name"], data["phone"],
+                    data.get("amount"), data.get("date"), data.get("month")
+                )
                 if ok:
                     await update.message.reply_text("✅ Записано на " + result + "!")
                 else:
@@ -334,8 +378,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not trigger_zhora and not dialog_active and not has_photo:
         return
 
+    # ── Швидкий запис ліда ──
     if trigger_zhora and re.search(r"запиши\s+л[іiи]да?|записать\s+лид|запиши\s+лида", text_lower):
-        target_date = parse_date(text_lower)
+        target_date, month = parse_date(text_lower)
         cleaned = re.sub(r"жора[,\s]*", "", text, flags=re.IGNORECASE)
         cleaned = re.sub(r"запиши\s+л[іiи]да?\s*(на\s+(завтра|tomorrow|зафтра|\d{1,2}[.]\d{2}))?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"записать\s+лид[а]?\s*(на\s+(завтра|tomorrow|зафтра|\d{1,2}[.]\d{2}))?\s*[:—\-]?\s*", "", cleaned, flags=re.IGNORECASE)
@@ -345,7 +390,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = parts[0]
             phone = parts[1]
             amount = parts[2] if len(parts) >= 3 else None
-            ok, result = write_lead(name, phone, amount, target_date)
+            ok, result = write_lead(name, phone, amount, target_date, month)
             if ok:
                 msg = "✅ Записано!\n\n📅 " + result + "\n👤 " + name + "\n📞 " + phone
                 if amount:
@@ -360,18 +405,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Формат:\n"
                 "_Жора, запиши ліда: Іван, 0660123456, 2700_\n"
                 "_Жора, запиши ліда на завтра: Іван, 0660123456, 2700_\n"
-                "_Жора, запиши ліда на 30.04: Іван, 0660123456, 2700_",
+                "_Жора, запиши ліда на 30.05: Іван, 0660123456, 2700_",
                 parse_mode="Markdown"
             )
         return
 
+    # ── Форма ліда ──
     if trigger_zhora and re.search(r"нов(ий|ого)?\s+л[іiи]д|новый\s+лид|додай\s+л[іiи]да?|добавь\s+лид|форма", text_lower):
-        target_date = parse_date(text_lower)
-        lead_form_state[user_id] = {"step": "name", "date": target_date}
+        target_date, month = parse_date(text_lower)
+        lead_form_state[user_id] = {"step": "name", "date": target_date, "month": month}
         date_label = target_date or datetime.now().strftime("%d.%m")
         await update.message.reply_text("📋 Новий лід на " + date_label + "\n\nІм'я клієнта:")
         return
 
+    # ── Пошук ──
     if trigger_zhora and re.search(r"знайди|шукай|найди|поищи", text_lower):
         query = re.sub(r"жора[,\s]*", "", text_lower)
         query = re.sub(r"(знайди|шукай|найди|поищи)[,\s]*", "", query).strip()
@@ -382,7 +429,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines = ["🔍 Знайдено: " + str(len(results)) + "\n" + "─" * 20]
             for r in results:
                 lines.append(
-                    "📅 " + r["date"] + "\n"
+                    "📅 " + r["date"] + " (" + r["sheet"] + ")\n"
                     "👤 " + r["name"] + "\n"
                     "📞 " + r["phone"] + "\n"
                     "💰 " + r["amount"] + "\n"
@@ -391,6 +438,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("\n".join(lines))
         return
 
+    # ── Статистика ──
     if trigger_zhora and re.search(r"стат|скільки|сколько|підсумок|итог|доход", text_lower):
         stats = get_stats()
         if not stats:
@@ -405,6 +453,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Фото ──
     if has_photo and (trigger_zhora or dialog_active or caption):
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -427,6 +476,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Помилка: " + str(e))
         return
 
+    # ── Чеклист ──
     if trigger_zhora and re.search(
         r"(огляд|обьект|об.єкт|объект|осмотр|що брати|що взяти|збери|"
         r"дай кнопки|покажи кнопки|на уборку|на прибирання|що нести|"
@@ -437,6 +487,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Огляд об'єкту — відмічай що є:", reply_markup=checklist_keyboard([]))
         return
 
+    # ── Звичайний діалог ──
     if trigger_zhora or dialog_active:
         clean_text = re.sub(r"жора[,\s]*", "", text_lower).strip()
         if not clean_text:
