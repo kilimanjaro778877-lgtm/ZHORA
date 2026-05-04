@@ -3,3 +3,4 @@ python-telegram-bot
 gspread
 google-auth
 google-auth-oauthlib
+psycopg2-binary
