@@ -13,7 +13,17 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandle
 TELEGRAM_TOKEN = os.environ.get("SHOHA_TOKEN")
 ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_KEY")
 GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS_JSON")
-SHEET_ID       = "1_R7j0gmV7n8wQtrB_131iP3HiNAPA8_YiEHfgN0oP90"
+SHEET_ID       = os.environ.get("SHEET_ID")
+
+_required_env = {
+    "SHOHA_TOKEN": TELEGRAM_TOKEN,
+    "ANTHROPIC_KEY": ANTHROPIC_KEY,
+    "GOOGLE_CREDS_JSON": GOOGLE_CREDS,
+    "SHEET_ID": SHEET_ID,
+}
+_missing = [name for name, value in _required_env.items() if not value]
+if _missing:
+    raise SystemExit("Не задані обов'язкові env-vars: " + ", ".join(_missing))
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 

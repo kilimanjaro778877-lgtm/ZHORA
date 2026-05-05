@@ -1,6 +1,6 @@
-anthropic
-python-telegram-bot
-gspread
-google-auth
-google-auth-oauthlib
-psycopg2-binary
+anthropic>=0.39,<1.0
+python-telegram-bot>=21.0,<22.0
+gspread>=6.0,<7.0
+google-auth>=2.30,<3.0
+google-auth-oauthlib>=1.2,<2.0
+psycopg2-binary>=2.9,<3.0
