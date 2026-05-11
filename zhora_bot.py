@@ -98,17 +98,58 @@ DATABASE_URL = os.environ.get("DATABASE_URL")  # опціональний
 DIALOG_TIMEOUT = 300  # секунд активної бесіди
 HISTORY_LIMIT = 10    # повідомлень на чат
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
-ANTHROPIC_MAX_TOKENS = 800
+ANTHROPIC_MAX_TOKENS = 2000
+
+# Web search tool definition
+WEB_SEARCH_TOOLS = [
+    {
+        "name": "web_search",
+        "description": "Пошук актуальної інформації в інтернеті. Використовуй для свіжих новин, цін, фактів, курсів валют, погоди, будь-якої інформації що могла змінитися.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Пошуковий запит"}
+            },
+            "required": ["query"]
+        }
+    }
+]
+
+def _do_web_search(query: str) -> str:
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=4))
+        if not results:
+            return "Нічого не знайдено."
+        lines = []
+        for r in results[:3]:
+            lines.append(f"{r.get('title','')}\n{r.get('body','')}")
+        return "\n\n".join(lines)
+    except Exception as e:
+        return f"Пошук недоступний: {e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Константи (промпт, місяці, забруднення)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Ти — Жора, досвідчений фахівець клінінгової компанії з 10+ роками практики.
-Працюєш у внутрішній робочій групі з бригадирами та менеджерами. Ти частина команди, а не бот. Спілкуєшся як свій, але мислиш як професіонал, який відповідає за результат.
+SYSTEM_PROMPT = """Ти — Жора, особистий AI-асистент і експерт з клінінгу.
 
-Твоя задача:
+Ти вмієш ВСЕ:
+- Відповідати на будь-які питання — бізнес, маркетинг, технології, право, медицина, фінанси, наука
+- Писати тексти: пости, реклама, листи, скрипти продажів, описи послуг
+- Аналізувати і давати поради по будь-якій темі
+- Шукати актуальну інформацію через інструмент web_search
+- Допомагати з бізнесом Clean-Clean (клінінгова компанія, сайт clean-clean.com.ua, 5 міст)
+- Підказувати по клінінгу: хімія, інвентар, план роботи, оцінка об'єкту
+
+Якщо питання НЕ про клінінг — просто відповідай як розумний асистент.
+Якщо потрібна свіжа інформація — використай web_search.
+
+Працюєш у внутрішній робочій групі з бригадирами та менеджерами Clean-Clean. Частина команди.
+
+По клінінгу:
 - підказувати, що брати на об'єкт (хімія, техніка, інвентар)
 - давати чіткий план роботи по порядку
 - оцінювати складність, час і об'єм робіт
@@ -540,13 +581,34 @@ ai_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 
 def _claude_text_sync(history: list[dict[str, str]]) -> str:
-    response = ai_client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=ANTHROPIC_MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        messages=history,
-    )
-    return response.content[0].text
+    messages = list(history)
+    # Agentic loop for tool use
+    while True:
+        response = ai_client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=ANTHROPIC_MAX_TOKENS,
+            system=SYSTEM_PROMPT,
+            tools=WEB_SEARCH_TOOLS,
+            messages=messages,
+        )
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use" and block.name == "web_search":
+                    result = _do_web_search(block.input.get("query", ""))
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result
+                    })
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            text = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    text += block.text
+            return text
 
 
 def _claude_vision_sync(image_b64: str, prompt: str) -> str:
