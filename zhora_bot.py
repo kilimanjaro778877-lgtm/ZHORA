@@ -355,6 +355,25 @@ class Storage:
                     chat_id BIGINT PRIMARY KEY,
                     last_active TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
+
+                CREATE TABLE IF NOT EXISTS user_memory (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    note TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                CREATE INDEX IF NOT EXISTS user_memory_uid_idx ON user_memory(user_id);
+
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    chat_id BIGINT NOT NULL,
+                    text TEXT NOT NULL,
+                    remind_at TIMESTAMPTZ NOT NULL,
+                    sent BOOLEAN NOT NULL DEFAULT false,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                CREATE INDEX IF NOT EXISTS reminders_sent_idx ON reminders(sent, remind_at);
             """)
             conn.commit()
 
@@ -436,7 +455,7 @@ class Storage:
             )
             conn.commit()
 
-    # ── lead форми (in-memory: губляться при рестарті, але це 30 секунд) ─
+    # ── lead форми ────────────────────────────────────────────────────────
     def get_lead_form(self, user_id: int) -> dict[str, Any] | None:
         return self._lead_forms.get(user_id)
 
@@ -445,6 +464,87 @@ class Storage:
 
     def pop_lead_form(self, user_id: int) -> dict[str, Any] | None:
         return self._lead_forms.pop(user_id, None)
+
+    # ── пам'ять користувача ───────────────────────────────────────────────
+    async def add_memory(self, user_id: int, note: str) -> None:
+        if self._pg_ok:
+            await asyncio.to_thread(self._pg_add_memory, user_id, note)
+
+    def _pg_add_memory(self, user_id: int, note: str) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO user_memory(user_id, note) VALUES(%s, %s)", (user_id, note))
+            conn.commit()
+
+    async def get_memories(self, user_id: int) -> list[str]:
+        if self._pg_ok:
+            return await asyncio.to_thread(self._pg_get_memories, user_id)
+        return []
+
+    def _pg_get_memories(self, user_id: int) -> list[str]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT note FROM user_memory WHERE user_id=%s ORDER BY created_at DESC LIMIT 20",
+                (user_id,)
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    async def clear_memories(self, user_id: int) -> None:
+        if self._pg_ok:
+            await asyncio.to_thread(self._pg_clear_memories, user_id)
+
+    def _pg_clear_memories(self, user_id: int) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM user_memory WHERE user_id=%s", (user_id,))
+            conn.commit()
+
+    # ── нагадування ───────────────────────────────────────────────────────
+    async def add_reminder(self, user_id: int, chat_id: int, text: str, remind_at: datetime) -> None:
+        if self._pg_ok:
+            await asyncio.to_thread(self._pg_add_reminder, user_id, chat_id, text, remind_at)
+
+    def _pg_add_reminder(self, user_id: int, chat_id: int, text: str, remind_at: datetime) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO reminders(user_id, chat_id, text, remind_at) VALUES(%s,%s,%s,%s)",
+                (user_id, chat_id, text, remind_at)
+            )
+            conn.commit()
+
+    async def get_pending_reminders(self) -> list[dict]:
+        if self._pg_ok:
+            return await asyncio.to_thread(self._pg_get_pending)
+        return []
+
+    def _pg_get_pending(self) -> list[dict]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, user_id, chat_id, text FROM reminders "
+                "WHERE sent=false AND remind_at <= now() AT TIME ZONE 'Europe/Kiev'"
+            )
+            return [{"id": r[0], "user_id": r[1], "chat_id": r[2], "text": r[3]} for r in cur.fetchall()]
+
+    async def mark_reminder_sent(self, reminder_id: int) -> None:
+        if self._pg_ok:
+            await asyncio.to_thread(self._pg_mark_sent, reminder_id)
+
+    def _pg_mark_sent(self, reminder_id: int) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE reminders SET sent=true WHERE id=%s", (reminder_id,))
+            conn.commit()
+
+    async def get_user_reminders(self, user_id: int) -> list[dict]:
+        if self._pg_ok:
+            return await asyncio.to_thread(self._pg_get_user_reminders, user_id)
+        return []
+
+    def _pg_get_user_reminders(self, user_id: int) -> list[dict]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, text, remind_at FROM reminders "
+                "WHERE user_id=%s AND sent=false ORDER BY remind_at ASC LIMIT 10",
+                (user_id,)
+            )
+            return [{"id": r[0], "text": r[1], "remind_at": r[2]} for r in cur.fetchall()]
 
 
 storage = Storage()
@@ -778,6 +878,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not trigger and not is_active and not has_photo:
         return
 
+    # ── Пам'ять ────────────────────────────────────────────────────────
+    if trigger and await _handle_memory(update, text, text_lower):
+        return
+
+    # ── Нагадування ────────────────────────────────────────────────────
+    if trigger and await _handle_reminder(update, text, text_lower):
+        return
+
     # ── Швидкий запис ліда ─────────────────────────────────────────────
     if trigger and re.search(r"запиши\s+л[іиi]да?|записать\s+лид|запиши\s+лида", text_lower):
         await _handle_quick_lead(update, text)
@@ -983,13 +1091,150 @@ async def _handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text(f"Помилка аналізу фото: {exc}")
 
 
+def parse_time(text: str) -> datetime | None:
+    """Parse time from text: 'о 18:00', 'через 2 години', 'завтра о 9:00'"""
+    t = text.lower()
+    now = datetime.now(timezone(timedelta(hours=3)))
+
+    # через N хвилин/годин
+    m = re.search(r"через\s+(\d+)\s*(хвилин|хвилини|хв|минут|мин|годин|год|час)", t)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if any(u in unit for u in ["хв", "мин", "хвилин"]):
+            return now + timedelta(minutes=n)
+        return now + timedelta(hours=n)
+
+    # о HH:MM або в HH:MM
+    m = re.search(r"[ово]\s+(\d{1,2})[:\.](\d{2})", t)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        target = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        # завтра
+        if "завтра" in t:
+            target += timedelta(days=1)
+        return target
+
+    # просто час HH:MM
+    m = re.search(r"\b(\d{1,2})[:\.](\d{2})\b", t)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        target = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        if "завтра" in t:
+            target += timedelta(days=1)
+        return target
+
+    return None
+
+
+async def _handle_memory(update: Update, text: str, text_lower: str) -> bool:
+    """Handle memory commands. Returns True if handled."""
+    user_id = update.effective_user.id
+
+    # запам'ятай / запомни
+    if re.search(r"\b(запам'ятай|запамятай|запомни|запиши собі|remember)\b", text_lower):
+        note = re.sub(r"жора[,\s]*", "", text, flags=re.IGNORECASE)
+        note = re.sub(r"\b(запам'ятай|запамятай|запомни|запиши собі|remember)[,:\s]*", "", note, flags=re.IGNORECASE).strip()
+        if note:
+            await storage.add_memory(user_id, note)
+            await update.message.reply_text(f"✅ Запам'ятав:\n_{note}_", parse_mode="Markdown")
+        return True
+
+    # що пам'ятаєш / что помнишь
+    if re.search(r"\b(що ти пам'ятаєш|що пам'ятаєш|что помнишь|що знаєш про мене|мої нотатки)\b", text_lower):
+        memories = await storage.get_memories(user_id)
+        if not memories:
+            await update.message.reply_text("Поки нічого не запам'ятав. Скажи 'Жора, запам'ятай ...'")
+        else:
+            lines = "\n".join(f"• {m}" for m in memories)
+            await update.message.reply_text(f"📝 Пам'ятаю:\n{lines}")
+        return True
+
+    # забудь все / очисти пам'ять
+    if re.search(r"\b(забудь все|очисти пам'ять|видали нотатки)\b", text_lower):
+        await storage.clear_memories(user_id)
+        await update.message.reply_text("🗑 Очищено. Пам'ять порожня.")
+        return True
+
+    return False
+
+
+async def _handle_reminder(update: Update, text: str, text_lower: str) -> bool:
+    """Handle reminder commands. Returns True if handled."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    # нагадай / напомни
+    if re.search(r"\b(нагадай|нагади|напомни|нагадування)\b", text_lower):
+        # показати список нагадувань
+        if re.search(r"\b(мої нагадування|покажи нагадування|список нагадувань)\b", text_lower):
+            reminders = await storage.get_user_reminders(user_id)
+            if not reminders:
+                await update.message.reply_text("Немає активних нагадувань.")
+            else:
+                tz = timezone(timedelta(hours=3))
+                lines = []
+                for r in reminders:
+                    t = r["remind_at"]
+                    if hasattr(t, "astimezone"):
+                        t = t.astimezone(tz)
+                    lines.append(f"⏰ {t.strftime('%d.%m %H:%M')} — {r['text']}")
+                await update.message.reply_text("\n".join(lines))
+            return True
+
+        # створити нагадування
+        remind_at = parse_time(text_lower)
+        if remind_at:
+            # витягуємо текст нагадування
+            reminder_text = re.sub(r"жора[,\s]*", "", text, flags=re.IGNORECASE)
+            reminder_text = re.sub(
+                r"\b(нагадай|нагади|напомни)[,\s]*", "", reminder_text, flags=re.IGNORECASE
+            )
+            # прибираємо часові маркери
+            reminder_text = re.sub(
+                r"(через\s+\d+\s*\w+|о\s+\d{1,2}[:.]\d{2}|завтра|сьогодні|\d{1,2}[:.]\d{2})",
+                "", reminder_text, flags=re.IGNORECASE
+            ).strip().strip(",").strip()
+
+            if not reminder_text:
+                reminder_text = "Нагадування"
+
+            await storage.add_reminder(user_id, chat_id, reminder_text, remind_at)
+            tz = timezone(timedelta(hours=3))
+            time_str = remind_at.astimezone(tz).strftime("%d.%m о %H:%M")
+            await update.message.reply_text(
+                f"⏰ Нагадаю {time_str}:\n_{reminder_text}_", parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                "Не зрозумів коли нагадати. Спробуй:\n"
+                "_Жора, нагадай о 18:00 зателефонувати_\n"
+                "_Жора, нагадай через 2 години ..._",
+                parse_mode="Markdown"
+            )
+        return True
+
+    return False
+
+
 async def _handle_dialog(update: Update, chat_id: int, text: str) -> None:
     clean_text = re.sub(r"жора[,\s]*", "", text, flags=re.IGNORECASE).strip()
     if not clean_text:
         return
 
+    # Inject user memories into context
+    user_id = update.effective_user.id
+    memories = await storage.get_memories(user_id)
+    memory_ctx = ""
+    if memories:
+        memory_ctx = "\n\n[Що я пам'ятаю про тебе]:\n" + "\n".join(f"- {m}" for m in memories[:10])
+
     history = await storage.get_history(chat_id)
-    messages = normalize_history(history, clean_text)
+    messages = normalize_history(history, clean_text + memory_ctx if memory_ctx else clean_text)
 
     try:
         reply = await claude_text(messages)
@@ -1046,6 +1291,27 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def reminder_scheduler(app: "Application") -> None:
+    """Background task: check and send due reminders every 30 seconds."""
+    while True:
+        try:
+            reminders = await storage.get_pending_reminders()
+            for r in reminders:
+                try:
+                    await app.bot.send_message(
+                        chat_id=r["chat_id"],
+                        text=f"⏰ *Нагадування:*\n{r['text']}",
+                        parse_mode="Markdown"
+                    )
+                    await storage.mark_reminder_sent(r["id"])
+                    log.info("Reminder sent: id=%s user=%s", r["id"], r["user_id"])
+                except Exception as exc:
+                    log.warning("Failed to send reminder %s: %s", r["id"], exc)
+        except Exception as exc:
+            log.warning("Reminder scheduler error: %s", exc)
+        await asyncio.sleep(30)
+
+
 async def main() -> None:
     log.info("Starting ZHORA bot. Whitelist size=%d, Postgres=%s",
              len(WHITELIST), "yes" if (HAS_POSTGRES and DATABASE_URL) else "no")
@@ -1061,6 +1327,9 @@ async def main() -> None:
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     log.info("Bot is up and polling.")
+
+    # Start reminder scheduler
+    asyncio.create_task(reminder_scheduler(app))
 
     # Тримаємо процес живим
     stop_event = asyncio.Event()
