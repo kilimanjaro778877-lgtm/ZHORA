@@ -89,6 +89,8 @@ ANTHROPIC_KEY = _required_env("ANTHROPIC_KEY")
 GOOGLE_CREDS_JSON = _required_env("GOOGLE_CREDS_JSON")
 SHEET_ID = _required_env("GOOGLE_SHEET_ID")
 
+LIGHTRAG_URL = os.environ.get("LIGHTRAG_URL", "").rstrip("/")
+
 WHITELIST: set[int] = _parse_whitelist(os.environ.get("WHITELIST_IDS", ""))
 if not WHITELIST:
     log.warning("WHITELIST_IDS порожній — НІХТО не зможе користуватися ботом")
@@ -446,6 +448,22 @@ class Storage:
         async with self._lock:
             self._memory.setdefault(chat_id, ChatState()).last_active = time.time()
 
+    async def reset_dialog(self, chat_id: int) -> None:
+        if self._pg_ok:
+            await asyncio.to_thread(self._pg_reset_dialog, chat_id)
+            return
+        async with self._lock:
+            if chat_id in self._memory:
+                self._memory[chat_id].last_active = 0.0
+
+    def _pg_reset_dialog(self, chat_id: int) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE chat_meta SET last_active = '1970-01-01' WHERE chat_id = %s",
+                (chat_id,),
+            )
+            conn.commit()
+
     def _pg_touch(self, chat_id: int) -> None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
@@ -735,6 +753,38 @@ async def claude_vision(image_b64: str, prompt: str) -> str:
     return await asyncio.to_thread(_claude_vision_sync, image_b64, prompt)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LightRAG (локальна база знань)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import json as _json
+import urllib.request as _urllib
+
+
+def _query_rag_sync(query: str) -> str:
+    data = _json.dumps({"query": query, "mode": "hybrid"}).encode()
+    req = _urllib.Request(
+        f"{LIGHTRAG_URL}/query",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with _urllib.urlopen(req, timeout=8) as resp:
+        result = _json.loads(resp.read())
+        return result.get("response", "")
+
+
+async def query_rag(query: str) -> str:
+    if not LIGHTRAG_URL:
+        return ""
+    try:
+        result = await asyncio.to_thread(_query_rag_sync, query)
+        return result.strip()
+    except Exception as exc:
+        log.warning("LightRAG query failed: %s", exc)
+        return ""
+
+
 def normalize_history(history: list[dict[str, str]], new_user_msg: str) -> list[dict[str, str]]:
     """
     Anthropic API вимагає чергування ролей user/assistant.
@@ -862,6 +912,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if trigger or is_active:
         await storage.touch_dialog(chat_id)
+
+    # ── Команда "жора стоп/замовкни" — скидає активний діалог ──────────
+    if trigger and re.search(r"\b(стоп|замовкни|заткнись|молчи|тихо|спи|відпочивай|хватит|досить)\b", text_lower):
+        storage.pop_lead_form(user_id)
+        await storage.reset_dialog(chat_id)
+        await update.message.reply_text("Ок, мовчу 🤫")
+        return
 
     # ── Команда скасування діалогу/форми ────────────────────────────────
     if trigger and re.search(r"\b(скасуй|відміна|отмена|cancel|выход|вихід)\b", text_lower):
@@ -1226,15 +1283,23 @@ async def _handle_dialog(update: Update, chat_id: int, text: str) -> None:
     if not clean_text:
         return
 
-    # Inject user memories into context
     user_id = update.effective_user.id
-    memories = await storage.get_memories(user_id)
-    memory_ctx = ""
+
+    # Паралельно: пам'ять юзера + RAG
+    memories, rag_result = await asyncio.gather(
+        storage.get_memories(user_id),
+        query_rag(clean_text),
+    )
+
+    extra_ctx = ""
     if memories:
-        memory_ctx = "\n\n[Що я пам'ятаю про тебе]:\n" + "\n".join(f"- {m}" for m in memories[:10])
+        extra_ctx += "\n\n[Що я пам'ятаю про тебе]:\n" + "\n".join(f"- {m}" for m in memories[:10])
+    if rag_result:
+        extra_ctx += f"\n\n[З бази знань]:\n{rag_result}"
 
     history = await storage.get_history(chat_id)
-    messages = normalize_history(history, clean_text + memory_ctx if memory_ctx else clean_text)
+    full_msg = clean_text + extra_ctx if extra_ctx else clean_text
+    messages = normalize_history(history, full_msg)
 
     try:
         reply = await claude_text(messages)
